@@ -3,9 +3,11 @@ import concurrent.futures
 import json
 import os
 import uuid
+import resource
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import MappingProxyType
+from threading import Lock
 
 from qgis.core import (
     QgsProject,
@@ -14,12 +16,17 @@ from qgis.core import (
     QgsApplication,
 )
 from qgis import processing
-from . import mcp_schema
+try:
+    from . import mcp_schema
+except ImportError:
+    import mcp_schema
 
 # Socket and limits
 SOCKET_PATH = Path('/tmp/qgis-mcp.sock')
+TCP_PROXY_PORT = 8765
 MAX_MESSAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 TIMEOUT_SEC = 30
+MEMORY_LIMIT_BYTES = 1_000_000_000  # ~1 GB soft cap
 
 # Sandbox settings
 BLOCKED_MODULES = {
@@ -47,6 +54,7 @@ class McpServer:
         self.socket_path = Path(socket_path)
         self.server = None
         self._runs = {}
+        self._lock = Lock()
 
     async def start(self):
         if self.socket_path.exists():
@@ -92,6 +100,8 @@ class McpServer:
             return {'result': self._list_layers()}
         if method == 'list_algorithms':
             return {'result': self._list_algs()}
+        if method == 'list_resources':
+            return {'result': mcp_schema.resources}
         if method == 'run_processing':
             return await self._run_processing(req.get('params', {}))
         if method == 'run_script':
@@ -99,6 +109,9 @@ class McpServer:
         if method == 'fetch_log':
             run_id = req.get('params', {}).get('run_id')
             return {'result': self._runs.get(run_id)}
+        if method == 'cancel_run':
+            run_id = req.get('params', {}).get('run_id')
+            return {'result': self._cancel_run(run_id)}
         return {'error': 'unknown method'}
 
     def _list_layers(self):
@@ -121,35 +134,102 @@ class McpServer:
     async def _run_processing(self, params):
         alg_id = params.get('algorithm')
         alg_params = params.get('parameters', {})
-        # Simple path allow-list check: any string param that looks like a path
+        asynchronous = params.get('async', False)
+        # path allow-list
         for v in alg_params.values():
             if isinstance(v, str) and ('/' in v or v.endswith('.tif') or v.endswith('.gpkg')):
                 if not self._path_allowed(v):
                     return {'error': f'Path not allowed: {v}'}
-        ctx = QgsProcessingContext()
-        fb = QgsProcessingFeedback()
-        try:
-            res = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: processing.run(alg_id, alg_params, context=ctx, feedback=fb)
-            )
-            return {'result': res}
-        except Exception as e:
-            return {'error': str(e)}
+
+        def job(log):
+            ctx = QgsProcessingContext()
+            fb = self._feedback_for(log)
+            return processing.run(alg_id, alg_params, context=ctx, feedback=fb)
+
+        if not asynchronous:
+            try:
+                res = await asyncio.get_event_loop().run_in_executor(None, lambda: job({'progress': 0}))
+                return {'result': res}
+            except Exception as e:
+                return {'error': str(e)}
+
+        # async path
+        run_id = str(uuid.uuid4())
+        log = {'stdout': '', 'stderr': '', 'error': None, 'progress': 0, 'status': 'running', 'kind': 'processing'}
+        with self._lock:
+            self._runs[run_id] = log
+
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, lambda: job(log))
+
+        def done_cb(fut):
+            with self._lock:
+                if fut.cancelled():
+                    log['status'] = 'cancelled'
+                else:
+                    try:
+                        res = fut.result()
+                        log['result'] = res
+                        log['status'] = 'finished'
+                    except Exception as e:
+                        log['error'] = str(e)
+                        log['status'] = 'error'
+
+        future.add_done_callback(done_cb)
+        log['future'] = future
+        return {'result': {'run_id': run_id, 'status': 'running'}}
 
     async def _run_script(self, params):
         code = params.get('code', '')
+        asynchronous = params.get('async', False)
         run_id = str(uuid.uuid4())
-        log = {'stdout': '', 'stderr': '', 'error': None}
-        self._runs[run_id] = log
+        log = {'stdout': '', 'stderr': '', 'error': None, 'status': 'running', 'kind': 'script'}
+        with self._lock:
+            self._runs[run_id] = log
+
         loop = asyncio.get_event_loop()
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(None, self._sandbox_exec, code, log),
-                timeout=TIMEOUT_SEC,
-            )
-        except asyncio.TimeoutError:
-            log['error'] = f'timeout after {TIMEOUT_SEC}s'
-        return {'result': {'run_id': run_id, **log}}
+
+        async def run_sync():
+            try:
+                await asyncio.wait_for(loop.run_in_executor(None, self._sandbox_exec, code, log), timeout=TIMEOUT_SEC)
+            except asyncio.TimeoutError:
+                log['error'] = f'timeout after {TIMEOUT_SEC}s'
+                log['status'] = 'timeout'
+            else:
+                if log['error']:
+                    log['status'] = 'error'
+                else:
+                    log['status'] = 'finished'
+            return {'run_id': run_id, **log}
+
+        if not asynchronous:
+            res = await run_sync()
+            return {'result': res}
+
+        future = loop.run_in_executor(None, lambda: self._sandbox_exec(code, log))
+        log['future'] = future
+        return {'result': {'run_id': run_id, 'status': 'running'}}
+
+    def _feedback_for(self, log: dict):
+        class FB(QgsProcessingFeedback):
+            def setProgress(feedback_self, progress):
+                log['progress'] = progress
+                super().setProgress(progress)
+        return FB()
+
+    def _cancel_run(self, run_id):
+        if not run_id:
+            return {'error': 'missing run_id'}
+        with self._lock:
+            info = self._runs.get(run_id)
+            if not info:
+                return {'error': 'run_id not found'}
+            fut = info.get('future')
+            if fut and not fut.done():
+                fut.cancel()
+                info['status'] = 'cancelled'
+                return {'status': 'cancelled'}
+            return {'status': info.get('status', 'finished')}
 
     def _path_allowed(self, path: str) -> bool:
         try:
@@ -169,6 +249,12 @@ class McpServer:
         import builtins
         import io
         import contextlib
+
+        # memory limit (soft)
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT_BYTES, MEMORY_LIMIT_BYTES))
+        except Exception:
+            pass
 
         # Restrict builtins
         safe_builtins = {

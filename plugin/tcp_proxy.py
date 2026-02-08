@@ -2,7 +2,7 @@ import asyncio
 import json
 import struct
 import os
-from pathlib import Path
+import socket
 
 UDS = '/tmp/qgis-mcp.sock'
 TOKEN = os.environ.get('QGIS_MCP_TOKEN') or 'changeme'
@@ -38,5 +38,4 @@ async def main():
         await server.serve_forever()
 
 if __name__ == '__main__':
-    import socket
     asyncio.run(main())

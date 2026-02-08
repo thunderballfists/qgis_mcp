@@ -5,7 +5,7 @@ A QGIS plugin that runs a local MCP-style server over a Unix domain socket, expo
 - Sandboxed script runner: execute PyQGIS snippets with stdout/stderr capture (imports guarded, timeout).
 
 ## Status
-Prototype (0.1.0). Unix socket at `/tmp/qgis-mcp.sock`. Permissions 0600. No auth beyond local user.
+Prototype (0.2.0). Unix socket at `/tmp/qgis-mcp.sock`. Permissions 0600. Optional loopback TCP proxy with token (`QGIS_MCP_TOKEN`).
 
 ## Building / Installing
 1) Copy the `plugin/` folder to your QGIS profile plugins dir, e.g. `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/qgis_mcp`.
@@ -19,24 +19,27 @@ PYTHONPATH=/Applications/QGIS.app/Contents/Resources/python3.11/site-packages:/A
 
 ## Protocol (temporary)
 Length-prefixed JSON over the Unix socket.
-- `list_tools`: discover supported methods
+- `list_tools`: discover supported methods (from `mcp_schema.py`)
+- `list_resources`: discover resources
 - `list_layers`: returns id/name/type/crs
 - `list_algorithms`: returns id/name/provider
-- `run_processing`: `{ "algorithm": "native:buffer", "parameters": { ... } }`
-- `run_script`: `{ "code": "print('hi')" }` → returns run_id, stdout, stderr, error (timeout 30s, blocked imports: subprocess/socket/http/urllib/ssl/shutil/pathlib/os)
+- `run_processing`: `{ "algorithm": "native:buffer", "parameters": { ... }, "async": false|true }`
+  - async=true returns run_id immediately; poll via `fetch_log` (status/progress)
+  - `cancel_run` cancels if still running
+- `run_script`: `{ "code": "...", "async": false|true }` → sync returns stdout/stderr/error; async returns run_id
 - `fetch_log`: `{ "run_id": "..." }`
+- `cancel_run`: `{ "run_id": "..." }`
 
 ## Security
-- UDS 0600 (local user only).
-- No network exposure by default.
-- Script runner: blocked imports (subprocess, socket, http/urllib/ssl, shutil, pathlib, os), limited builtins, 30s timeout. Still consider untrusted code risky—extend allow-lists and FS guards for production.
-- File outputs: simple allow-list check on parameters; defaults to `/tmp` plus optional env `QGIS_MCP_ALLOW_DIRS=/path1:/path2`.
+- UDS 0600 (local user only). Optional loopback TCP proxy with token.
+- Script runner: blocked imports (subprocess, socket, http/urllib/ssl, shutil, pathlib, os), limited builtins, 30s timeout, ~1GB soft memory cap.
+- File outputs: allow-list check (defaults `/tmp`; extend with `QGIS_MCP_ALLOW_DIRS=/path1:/path2`).
+- Still treat untrusted code as risky; adjust allow-lists and limits as needed.
 
 ## Roadmap
-- Real MCP schema (tools/resources), discovery, and client examples.
-- Better sandbox (blocked imports, timeouts, path allow-list).
-- Progress reporting and cancellation.
-- Windows named-pipe support and optional loopback TCP with token auth.
+- Formal MCP schema responses (JSON-LD) and richer resources.
+- Progress/cancel present; improve feedback streaming.
+- Windows named-pipe support and hardened FS/CPU/memory quotas.
 
 ## Tests
 ```
@@ -46,4 +49,4 @@ python3 -m venv .venv
 ```
 
 ## Client sample
-See `client_example.py` for a minimal Unix-socket client that calls `list_tools`, `list_layers`, and `run_script`.
+See `client_example.py` for UDS and TCP+token examples calling `list_tools`, `list_layers`, and `run_script`.

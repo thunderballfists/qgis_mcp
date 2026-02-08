@@ -59,9 +59,10 @@ def bootstrap_qgis_stubs():
 
 
 def load_server():
-    # ensure plugin dir in path
-    sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent / 'plugin'))
-    return importlib.import_module('server')
+    from importlib.machinery import SourceFileLoader
+    plugin_dir = pathlib.Path(__file__).resolve().parent.parent / 'plugin'
+    sys.path.append(str(plugin_dir))
+    return SourceFileLoader('server', str(plugin_dir / 'server.py')).load_module()
 
 
 def test_list_layers():
@@ -70,6 +71,8 @@ def test_list_layers():
     srv = server.McpServer(iface=None)
     layers = srv._list_layers()
     assert layers[0]['name'] == 'A'
+    tools = server.mcp_schema.tools
+    assert any(t['name'] == 'list_layers' for t in tools)
 
 
 def test_path_allow():
