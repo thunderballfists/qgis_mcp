@@ -1,8 +1,8 @@
 # QGIS MCP Bridge
 
-A QGIS plugin that runs an MCP server over a Unix domain socket, exposing:
+A QGIS plugin that runs a local MCP-style server over a Unix domain socket, exposing:
 - Structured tools: list layers, list processing algorithms, run processing.
-- Sandboxed script runner: execute PyQGIS snippets with stdout/stderr capture.
+- Sandboxed script runner: execute PyQGIS snippets with stdout/stderr capture (imports guarded, timeout).
 
 ## Status
 Prototype (0.1.0). Unix socket at `/tmp/qgis-mcp.sock`. Permissions 0600. No auth beyond local user.
@@ -18,17 +18,17 @@ PYTHONPATH=/Applications/QGIS.app/Contents/Resources/python3.11/site-packages:/A
 3) Restart QGIS and enable **QGIS MCP Bridge**. Toggle the toolbar button to start/stop the server.
 
 ## Protocol (temporary)
-Messages are length-prefixed JSON over the Unix socket.
+Length-prefixed JSON over the Unix socket.
 - `list_layers`: returns id/name/type/crs
 - `list_algorithms`: returns id/name/provider
 - `run_processing`: `{ "algorithm": "native:buffer", "parameters": { ... } }`
-- `run_script`: `{ "code": "print('hi')" }` → returns run_id, stdout, stderr, error
+- `run_script`: `{ "code": "print('hi')" }` → returns run_id, stdout, stderr, error (timeout 30s, blocked imports: subprocess/socket/http/urllib/ssl/shutil/pathlib/os)
 - `fetch_log`: `{ "run_id": "..." }`
 
 ## Security
 - UDS 0600 (local user only).
-- No network exposure.
-- Script runner is minimally sandboxed; do not trust unvetted code. Add allow-lists/blocked imports/timeouts before production use.
+- No network exposure by default.
+- Script runner: blocked imports (subprocess, socket, http/urllib/ssl, shutil, pathlib, os), limited builtins, 30s timeout. Still consider untrusted code risky—extend allow-lists and FS guards for production.
 
 ## Roadmap
 - Real MCP schema (tools/resources), discovery, and client examples.

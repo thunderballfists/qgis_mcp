@@ -1,23 +1,36 @@
 import asyncio
+import concurrent.futures
 import json
 import os
-import socket
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import MappingProxyType
 
 from qgis.core import (
     QgsProject,
     QgsProcessingFeedback,
     QgsProcessingContext,
-    QgsProcessingAlgorithm,
     QgsApplication,
 )
 from qgis import processing
 
+# Socket and limits
 SOCKET_PATH = Path('/tmp/qgis-mcp.sock')
 MAX_MESSAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 TIMEOUT_SEC = 30
+
+# Sandbox settings
+BLOCKED_MODULES = {
+    'subprocess',
+    'socket',
+    'http',
+    'urllib',
+    'ssl',
+    'shutil',
+    'pathlib',  # disallow arbitrary fs writes; we’ll expose limited paths later
+    'os',       # prevent env tampering; we expose nothing here
+}
 
 class McpServer:
     def __init__(self, iface, socket_path=SOCKET_PATH):
@@ -112,20 +125,71 @@ class McpServer:
         run_id = str(uuid.uuid4())
         log = {'stdout': '', 'stderr': '', 'error': None}
         self._runs[run_id] = log
-        def runner():
-            import io, sys, contextlib
-            buf_out, buf_err = io.StringIO(), io.StringIO()
-            safe_globals = {'iface': self.iface, 'QgsProject': QgsProject, 'processing': processing}
-            try:
-                with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
-                    exec(code, safe_globals, {})
-            except Exception as e:
-                log['error'] = str(e)
-            log['stdout'] = buf_out.getvalue()
-            log['stderr'] = buf_err.getvalue()
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, runner)
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._sandbox_exec, code, log),
+                timeout=TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            log['error'] = f'timeout after {TIMEOUT_SEC}s'
         return {'result': {'run_id': run_id, **log}}
+
+    def _sandbox_exec(self, code: str, log: dict):
+        """
+        Execute user code with guardrails:
+        - Block dangerous imports
+        - Restrict builtins
+        - Capture stdout/stderr
+        """
+        import builtins
+        import io
+        import contextlib
+
+        # Restrict builtins
+        safe_builtins = {
+            'print': print,
+            'range': range,
+            'len': len,
+            'min': min,
+            'max': max,
+            'sum': sum,
+            'map': map,
+            'filter': filter,
+            'any': any,
+            'all': all,
+            'zip': zip,
+            'enumerate': enumerate,
+        }
+        # Prepare globals with limited symbols
+        safe_globals = {
+            '__builtins__': MappingProxyType(safe_builtins),
+            'iface': self.iface,
+            'QgsProject': QgsProject,
+            'processing': processing,
+        }
+
+        # Patch __import__ to block dangerous modules
+        real_import = builtins.__import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            root = name.split('.')[0]
+            if root in BLOCKED_MODULES:
+                raise ImportError(f"Import of '{name}' is blocked")
+            return real_import(name, globals, locals, fromlist, level)
+
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                builtins.__import__ = guarded_import
+                compiled = compile(code, '<mcp_script>', 'exec')
+                exec(compiled, safe_globals, {})
+        except Exception as e:
+            log['error'] = str(e)
+        finally:
+            builtins.__import__ = real_import
+        log['stdout'] = buf_out.getvalue()
+        log['stderr'] = buf_err.getvalue()
 
 mcp_server_singleton = None
 
