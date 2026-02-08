@@ -32,6 +32,14 @@ BLOCKED_MODULES = {
     'os',       # prevent env tampering; we expose nothing here
 }
 
+# File-system allow-list (prefixes). Extend via env QGIS_MCP_ALLOW_DIRS=/path1:/path2
+ALLOW_PATHS = [
+    '/tmp',
+]
+_extra_allow = os.environ.get('QGIS_MCP_ALLOW_DIRS')
+if _extra_allow:
+    ALLOW_PATHS.extend([p for p in _extra_allow.split(':') if p])
+
 class McpServer:
     def __init__(self, iface, socket_path=SOCKET_PATH):
         self.iface = iface
@@ -77,6 +85,8 @@ class McpServer:
 
     async def dispatch(self, req):
         method = req.get('method')
+        if method == 'list_tools':
+            return {'result': self._list_tools()}
         if method == 'list_layers':
             return {'result': self._list_layers()}
         if method == 'list_algorithms':
@@ -89,6 +99,15 @@ class McpServer:
             run_id = req.get('params', {}).get('run_id')
             return {'result': self._runs.get(run_id)}
         return {'error': 'unknown method'}
+
+    def _list_tools(self):
+        return [
+            {'name': 'list_layers', 'description': 'List project layers with id/name/type/crs'},
+            {'name': 'list_algorithms', 'description': 'List available Processing algorithms'},
+            {'name': 'run_processing', 'description': 'Run a processing algorithm with parameters'},
+            {'name': 'run_script', 'description': 'Run sandboxed PyQGIS code with stdout/stderr capture'},
+            {'name': 'fetch_log', 'description': 'Fetch stdout/stderr/error from a previous run'},
+        ]
 
     def _list_layers(self):
         layers = []
@@ -110,6 +129,11 @@ class McpServer:
     async def _run_processing(self, params):
         alg_id = params.get('algorithm')
         alg_params = params.get('parameters', {})
+        # Simple path allow-list check: any string param that looks like a path
+        for v in alg_params.values():
+            if isinstance(v, str) and ('/' in v or v.endswith('.tif') or v.endswith('.gpkg')):
+                if not self._path_allowed(v):
+                    return {'error': f'Path not allowed: {v}'}
         ctx = QgsProcessingContext()
         fb = QgsProcessingFeedback()
         try:
@@ -134,6 +158,14 @@ class McpServer:
         except asyncio.TimeoutError:
             log['error'] = f'timeout after {TIMEOUT_SEC}s'
         return {'result': {'run_id': run_id, **log}}
+
+    def _path_allowed(self, path: str) -> bool:
+        try:
+            p = Path(path).resolve()
+            allowed = [Path(prefix).resolve() for prefix in ALLOW_PATHS]
+            return any(str(p).startswith(str(a)) for a in allowed)
+        except Exception:
+            return False
 
     def _sandbox_exec(self, code: str, log: dict):
         """
@@ -194,7 +226,7 @@ class McpServer:
 mcp_server_singleton = None
 
 @asynccontextmanager
-def start_server(iface):
+async def start_server(iface):
     global mcp_server_singleton
     mcp_server_singleton = McpServer(iface)
     await mcp_server_singleton.start()

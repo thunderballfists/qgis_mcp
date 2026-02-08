@@ -19,6 +19,7 @@ PYTHONPATH=/Applications/QGIS.app/Contents/Resources/python3.11/site-packages:/A
 
 ## Protocol (temporary)
 Length-prefixed JSON over the Unix socket.
+- `list_tools`: discover supported methods
 - `list_layers`: returns id/name/type/crs
 - `list_algorithms`: returns id/name/provider
 - `run_processing`: `{ "algorithm": "native:buffer", "parameters": { ... } }`
@@ -29,9 +30,20 @@ Length-prefixed JSON over the Unix socket.
 - UDS 0600 (local user only).
 - No network exposure by default.
 - Script runner: blocked imports (subprocess, socket, http/urllib/ssl, shutil, pathlib, os), limited builtins, 30s timeout. Still consider untrusted code risky—extend allow-lists and FS guards for production.
+- File outputs: simple allow-list check on parameters; defaults to `/tmp` plus optional env `QGIS_MCP_ALLOW_DIRS=/path1:/path2`.
 
 ## Roadmap
 - Real MCP schema (tools/resources), discovery, and client examples.
 - Better sandbox (blocked imports, timeouts, path allow-list).
 - Progress reporting and cancellation.
 - Windows named-pipe support and optional loopback TCP with token auth.
+
+## Tests
+```
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt  # pytest
+.venv/bin/python -m pytest tests
+```
+
+## Client sample
+See `client_example.py` for a minimal Unix-socket client that calls `list_tools`, `list_layers`, and `run_script`.
