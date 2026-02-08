@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/qgis_mcp">
+    <file>icons/mcp.svg</file>
+  </qresource>
+</RCC>

@@ -1,0 +1,14 @@
+[general]
+name=QGIS MCP Bridge
+description=MCP server inside QGIS exposing structured tools and a sandboxed script runner over a Unix socket.
+about=Provides MCP tools for layer/processing operations and a guarded PyQGIS script runner with logging. Uses Unix domain sockets for local secure transport.
+version=0.1.0
+qgisMinimumVersion=3.28
+author=Codex
+email=
+homepage=
+category=Plugins
+icon=icons/mcp.svg
+class_name=QgisMcpPlugin
+experimental=True
+deprecated=False
