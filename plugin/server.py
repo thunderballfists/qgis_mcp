@@ -14,6 +14,7 @@ from qgis.core import (
     QgsApplication,
 )
 from qgis import processing
+from . import mcp_schema
 
 # Socket and limits
 SOCKET_PATH = Path('/tmp/qgis-mcp.sock')
@@ -86,7 +87,7 @@ class McpServer:
     async def dispatch(self, req):
         method = req.get('method')
         if method == 'list_tools':
-            return {'result': self._list_tools()}
+            return {'result': mcp_schema.tools}
         if method == 'list_layers':
             return {'result': self._list_layers()}
         if method == 'list_algorithms':
@@ -99,15 +100,6 @@ class McpServer:
             run_id = req.get('params', {}).get('run_id')
             return {'result': self._runs.get(run_id)}
         return {'error': 'unknown method'}
-
-    def _list_tools(self):
-        return [
-            {'name': 'list_layers', 'description': 'List project layers with id/name/type/crs'},
-            {'name': 'list_algorithms', 'description': 'List available Processing algorithms'},
-            {'name': 'run_processing', 'description': 'Run a processing algorithm with parameters'},
-            {'name': 'run_script', 'description': 'Run sandboxed PyQGIS code with stdout/stderr capture'},
-            {'name': 'fetch_log', 'description': 'Fetch stdout/stderr/error from a previous run'},
-        ]
 
     def _list_layers(self):
         layers = []
