@@ -59,10 +59,13 @@ def bootstrap_qgis_stubs():
 
 
 def load_server():
-    from importlib.machinery import SourceFileLoader
+    import importlib.util
     plugin_dir = pathlib.Path(__file__).resolve().parent.parent / 'plugin'
     sys.path.append(str(plugin_dir))
-    return SourceFileLoader('server', str(plugin_dir / 'server.py')).load_module()
+    spec = importlib.util.spec_from_file_location('server', plugin_dir / 'server.py')
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def test_list_layers():
